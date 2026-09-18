@@ -8,98 +8,131 @@ Original file is located at
 """
 
 import streamlit as st
-import sqlite3
+import gspread
+from google.oauth2.service_account import Credentials
+import pandas as pd
 from datetime import datetime, date
 import threading
 import time
-import pandas as pd
 
-DB_PATH = "granja.db"
+# ==================== CONEXIÓN CON GOOGLE SHEETS ====================
+SPREADSHEET_ID = "10aCfWrVTpIbXGMrM-TbQ4R_xFT7xP9ShtCgQN8go0LI"
 
-# ---------------- BASE DE DATOS ----------------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS estado (
-        id TEXT PRIMARY KEY,
-        caseta INTEGER,
-        corral TEXT,
-        poblacion INTEGER
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS movimientos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT,
-        unidad_id TEXT,
-        valor_anterior INTEGER,
-        valor_nuevo INTEGER,
-        delta INTEGER,
-        motivo TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS snapshots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT,
-        unidad_id TEXT,
-        poblacion INTEGER
-    )""")
-    # Inicializar las 18 unidades por caseta: 16 corrales + 2 enfermerías
-    for caseta in range(1, 5):
-        for i in range(1, 17):  # 1..16
-            uid = f"{caseta}-{i}"
-            c.execute("INSERT OR IGNORE INTO estado VALUES (?,?,?,?)",
-                      (uid, caseta, str(i), 0))
-        for e in ["E1", "E2"]:
-            uid = f"{caseta}-{e}"
-            c.execute("INSERT OR IGNORE INTO estado VALUES (?,?,?,?)",
-                      (uid, caseta, e, 0))
-    conn.commit()
-    conn.close()
+@st.cache_resource
+def get_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    return gspread.authorize(creds)
+
+@st.cache_resource
+def get_spreadsheet():
+    return get_client().open_by_key(SPREADSHEET_ID)
+
+# ==================== FUNCIONES DE BASE DE DATOS ====================
+def init_hojas():
+    """Crea las 72 filas iniciales en la pestaña 'estado' si no existen."""
+    sh = get_spreadsheet()
+    ws = sh.worksheet("estado")
+    valores = ws.get_all_values()
+
+    # Si solo tiene encabezados, llenamos las 72 unidades
+    if len(valores) <= 1:
+        filas = []
+        for caseta in range(1, 5):
+            for i in range(1, 17):
+                filas.append([f"{caseta}-{i}", str(caseta), str(i), "0"])
+            for e in ["E1", "E2"]:
+                filas.append([f"{caseta}-{e}", str(caseta), e, "0"])
+        ws.append_rows(filas, value_input_option="USER_ENTERED")
 
 def get_estado():
-    conn = sqlite3.connect(DB_PATH)
-    df = conn.execute("SELECT id, caseta, corral, poblacion FROM estado").fetchall()
-    conn.close()
-    return {row[0]: row[3] for row in df}
-
-def get_poblacion(estado, uid):
-    """Devuelve la población o 0 si la unidad no existe (evita KeyError)."""
-    return estado.get(uid, 0)
+    """Lee la pestaña 'estado' y devuelve {id: poblacion}."""
+    sh = get_spreadsheet()
+    ws = sh.worksheet("estado")
+    valores = ws.get_all_values()
+    estado = {}
+    for fila in valores[1:]:  # saltar encabezado
+        if len(fila) >= 4 and fila[0]:
+            try:
+                estado[fila[0]] = int(fila[3]) if fila[3] else 0
+            except ValueError:
+                estado[fila[0]] = 0
+    return estado
 
 def set_poblacion(unidad_id, nuevo_valor, motivo="ajuste manual"):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    anterior = c.execute("SELECT poblacion FROM estado WHERE id=?", (unidad_id,)).fetchone()[0]
-    if anterior == nuevo_valor:
-        conn.close()
+    """Actualiza la población de una unidad y registra el movimiento."""
+    sh = get_spreadsheet()
+    ws_estado = sh.worksheet("estado")
+    valores = ws_estado.get_all_values()
+
+    # Buscar la fila del corral
+    fila_idx = None
+    valor_anterior = None
+    for i, fila in enumerate(valores[1:], start=2):  # fila 2 en adelante
+        if fila and fila[0] == unidad_id:
+            fila_idx = i
+            try:
+                valor_anterior = int(fila[3]) if len(fila) > 3 and fila[3] else 0
+            except ValueError:
+                valor_anterior = 0
+            break
+
+    if fila_idx is None:
+        st.error(f"No se encontró la unidad {unidad_id} en la hoja")
         return
-    c.execute("UPDATE estado SET poblacion=? WHERE id=?", (nuevo_valor, unidad_id))
-    c.execute("""INSERT INTO movimientos (timestamp, unidad_id, valor_anterior, valor_nuevo, delta, motivo)
-                 VALUES (?,?,?,?,?,?)""",
-              (datetime.now().isoformat(), unidad_id, anterior, nuevo_valor,
-               nuevo_valor - anterior, motivo))
-    conn.commit()
-    conn.close()
+
+    if valor_anterior == nuevo_valor:
+        return
+
+    # Actualizar población (columna D = 4)
+    ws_estado.update_cell(fila_idx, 4, nuevo_valor)
+
+    # Registrar movimiento en la pestaña 'movimientos'
+    ws_mov = sh.worksheet("movimientos")
+    ws_mov.append_row([
+        datetime.now().isoformat(),
+        unidad_id,
+        str(valor_anterior),
+        str(nuevo_valor),
+        motivo
+    ], value_input_option="USER_ENTERED")
+
+    # Limpiar caché para que el próximo get_estado() traiga datos frescos
+    st.cache_data.clear()
 
 def guardar_snapshot(motivo="manual"):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    """Guarda un snapshot de todas las poblaciones en la pestaña 'snapshots'."""
+    sh = get_spreadsheet()
+    ws_estado = sh.worksheet("estado")
+    valores = ws_estado.get_all_values()
+
     hoy = date.today().isoformat()
-    filas = c.execute("SELECT id, poblacion FROM estado").fetchall()
-    for uid, pob in filas:
-        c.execute("INSERT INTO snapshots (fecha, unidad_id, poblacion) VALUES (?,?,?)",
-                  (hoy, uid, pob))
-    conn.commit()
-    conn.close()
+    filas = []
+    for fila in valores[1:]:
+        if fila and fila[0]:
+            poblacion = fila[3] if len(fila) > 3 else "0"
+            filas.append([hoy, fila[0], poblacion or "0"])
+
+    ws_snap = sh.worksheet("snapshots")
+    ws_snap.append_rows(filas, value_input_option="USER_ENTERED")
     return len(filas)
 
-# ---------------- GUARDADO AUTOMÁTICO A MEDIANOCHE ----------------
+# ==================== GUARDADO AUTOMÁTICO A MEDIANOCHE ====================
 def scheduler_medianoche():
     while True:
         ahora = datetime.now()
-        # Segundos hasta la próxima medianoche
-        manana = datetime(ahora.year, ahora.month, ahora.day) + __import__("datetime").timedelta(days=1)
+        manana = datetime(ahora.year, ahora.month, ahora.day) + \
+                 __import__("datetime").timedelta(days=1)
         espera = (manana - ahora).total_seconds()
         time.sleep(espera)
-        guardar_snapshot("automático medianoche")
+        try:
+            guardar_snapshot("automático medianoche")
+        except Exception as e:
+            print(f"Error en snapshot automático: {e}")
 
 @st.cache_resource
 def iniciar_scheduler():
@@ -107,21 +140,20 @@ def iniciar_scheduler():
     t.start()
     return True
 
-# ---------------- UI ----------------
+# ==================== CONFIGURACIÓN INICIAL ====================
 st.set_page_config(page_title="Granja de cerdos", layout="wide")
-init_db()
+init_hojas()
 iniciar_scheduler()
 
-
-
-# ---------------- EDITOR DE CADA UNIDAD ----------------
+# ==================== RENDER DE CADA UNIDAD ====================
 def render_unidad(uid, poblacion, compacto=False):
-    """Renderiza una unidad (corral o enfermería)."""
     with st.container(border=True):
         st.markdown(f"**{uid}**")
-        st.markdown(f"<div style='font-size:22px;font-weight:bold;text-align:center'>{poblacion}</div>",
-                    unsafe_allow_html=True)
-        with st.popover("✏️ Editar", use_container_width=True):
+        st.markdown(
+            f"<div style='font-size:22px;font-weight:bold;text-align:center'>{poblacion}</div>",
+            unsafe_allow_html=True
+        )
+        with st.popover("✏️ Editar", width="stretch"):
             modo = st.radio("Modo", ["Ajustar total", "Sumar/Restar"],
                             key=f"modo_{uid}", horizontal=True)
             if modo == "Ajustar total":
@@ -129,7 +161,7 @@ def render_unidad(uid, poblacion, compacto=False):
                                         value=poblacion, key=f"num_{uid}")
                 motivo = st.text_input("Motivo", key=f"mot_{uid}",
                                        placeholder="ej: movimiento, venta...")
-                if st.button("Guardar", key=f"save_{uid}", use_container_width=True):
+                if st.button("Guardar", key=f"save_{uid}", width="stretch"):
                     set_poblacion(uid, int(nuevo), motivo or "ajuste total")
                     st.rerun()
             else:
@@ -137,12 +169,12 @@ def render_unidad(uid, poblacion, compacto=False):
                                         key=f"delta_{uid}")
                 motivo = st.text_input("Motivo", key=f"motd_{uid}",
                                        placeholder="ej: muerte, nacimiento...")
-                if st.button("Aplicar", key=f"apply_{uid}", use_container_width=True):
+                if st.button("Aplicar", key=f"apply_{uid}", width="stretch"):
                     nuevo = max(0, poblacion + int(delta))
                     set_poblacion(uid, nuevo, motivo or "ajuste delta")
                     st.rerun()
 
-# ---------------- RENDER DE CADA CASETA ----------------
+# ==================== RENDER DE CADA CASETA ====================
 def render_caseta(caseta):
     st.subheader(f"🏠 Caseta {caseta}")
 
@@ -150,7 +182,6 @@ def render_caseta(caseta):
     for fila in range(8):
         filas.append((str(1 + fila * 2), str(2 + fila * 2)))
 
-    # HTML completo SIN indentación (una sola línea para evitar que Markdown lo trate como código)
     html = '<div style="display:flex; justify-content:center; padding:10px; background:#eaf4fb; border-radius:12px; border:1px solid #b0c4de;"><table style="border-collapse:separate; border-spacing:0 6px;">'
 
     for izq_id, der_id in filas:
@@ -176,10 +207,8 @@ def render_caseta(caseta):
         )
 
     html += '</table></div>'
-
     st.markdown(html, unsafe_allow_html=True)
 
-    # Expander con botones de edición
     with st.expander(f"✏️ Editar corrales de Caseta {caseta}"):
         cols = st.columns(6)
         todos_ids = [f"{caseta}-E1", f"{caseta}-E2"] + \
@@ -189,10 +218,9 @@ def render_caseta(caseta):
             with cols[idx % 6]:
                 pob = estado.get(uid, 0)
                 if st.button(f"{uid} ({pob})", key=f"editbtn_{uid}",
-                             use_container_width=True):
+                             width="stretch"):
                     st.session_state[f"editar_{uid}"] = True
 
-        # Editor del corral seleccionado
         for uid in todos_ids:
             if st.session_state.get(f"editar_{uid}", False):
                 pob = estado.get(uid, 0)
@@ -208,62 +236,79 @@ def render_caseta(caseta):
                     st.write("")
                     st.write("")
                     if st.button("💾 Guardar", key=f"editsave_{uid}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         set_poblacion(uid, int(nuevo), motivo or "ajuste manual")
                         st.session_state[f"editar_{uid}"] = False
                         st.rerun()
                     if st.button("❌ Cancelar", key=f"editcancel_{uid}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         st.session_state[f"editar_{uid}"] = False
                         st.rerun()
 
-
 # ==================== RENDER PRINCIPAL ====================
+st.title("🐖 Control de población - Granja")
 
-st.title("Control de población - Granja")
+with st.spinner("Cargando datos desde Google Sheets..."):
+    estado = get_estado()
 
-estado = get_estado()
-
-# Barra superior: totales y botón guardar
 total = sum(estado.values())
 col1, col2, col3 = st.columns([2, 1, 1])
 col1.metric("Población total", total)
-if col2.button("💾 Guardar snapshot manual", use_container_width=True):
-    n = guardar_snapshot("manual")
+if col2.button("💾 Guardar snapshot manual", width="stretch"):
+    with st.spinner("Guardando snapshot..."):
+        n = guardar_snapshot("manual")
     st.success(f"Snapshot guardado ({n} unidades)")
-if col3.button("🔄 Refrescar", use_container_width=True):
+if col3.button("🔄 Refrescar", width="stretch"):
+    st.cache_data.clear()
     st.rerun()
-
-# Debug temporal
-with st.expander("🔍 Debug (quitar después)"):
-    st.write(f"Unidades en DB: {len(estado)}")
-    st.write(f"Primeras 5: {list(estado.items())[:5]}")
 
 # Render de las 4 casetas
 for c in range(1, 5):
     render_caseta(c)
     st.markdown("---")
 
-# ---------------- AUDITORÍA ----------------
+# ==================== AUDITORÍA ====================
 with st.expander("📜 Historial de movimientos"):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""SELECT timestamp, unidad_id, valor_anterior, valor_nuevo, delta, motivo
-                           FROM movimientos ORDER BY id DESC LIMIT 200""").fetchall()
-    conn.close()
-    if rows:
-        df = pd.DataFrame(rows, columns=["Fecha", "Unidad", "Antes", "Después", "Δ", "Motivo"])
-        df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.strftime("%Y-%m-%d %H:%M:%S")
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("Sin movimientos registrados aún.")
+    try:
+        sh = get_spreadsheet()
+        ws = sh.worksheet("movimientos")
+        valores = ws.get_all_values()
+        if len(valores) > 1:
+            df = pd.DataFrame(valores[1:],
+                              columns=["Fecha", "Unidad", "Antes", "Después", "Motivo"])
+            # Calcular delta
+            try:
+                df["Δ"] = df["Después"].astype(int) - df["Antes"].astype(int)
+            except ValueError:
+                df["Δ"] = ""
+            df = df[["Fecha", "Unidad", "Antes", "Después", "Δ", "Motivo"]]
+            # Formatear fecha
+            try:
+                df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+            # Mostrar los últimos 200 (más recientes primero)
+            df = df.iloc[::-1].head(200)
+            st.dataframe(df, width="stretch")
+        else:
+            st.info("Sin movimientos registrados aún.")
+    except Exception as e:
+        st.error(f"Error leyendo movimientos: {e}")
 
 with st.expander("📸 Snapshots guardados"):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""SELECT fecha, COUNT(*), SUM(poblacion)
-                           FROM snapshots GROUP BY fecha ORDER BY fecha DESC""").fetchall()
-    conn.close()
-    if rows:
-        df = pd.DataFrame(rows, columns=["Fecha", "Unidades", "Total cerdos"])
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("Sin snapshots guardados aún.")
+    try:
+        sh = get_spreadsheet()
+        ws = sh.worksheet("snapshots")
+        valores = ws.get_all_values()
+        if len(valores) > 1:
+            df = pd.DataFrame(valores[1:], columns=["Fecha", "Unidad", "Población"])
+            # Agrupar por fecha
+            resumen = df.groupby("Fecha").agg(
+                Unidades=("Unidad", "count"),
+                Total=("Población", lambda x: pd.to_numeric(x, errors="coerce").sum())
+            ).reset_index().sort_values("Fecha", ascending=False)
+            st.dataframe(resumen, width="stretch")
+        else:
+            st.info("Sin snapshots guardados aún.")
+    except Exception as e:
+        st.error(f"Error leyendo snapshots: {e}")
