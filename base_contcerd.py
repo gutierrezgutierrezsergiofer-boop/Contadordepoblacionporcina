@@ -39,15 +39,26 @@ def init_hojas():
     ws = sh.worksheet("estado")
     valores = ws.get_all_values()
 
-    # Si solo tiene encabezados, llenamos las 72 unidades
-    if len(valores) <= 1:
-        filas = []
-        for caseta in range(1, 5):
-            for i in range(1, 17):
-                filas.append([f"{caseta}-{i}", str(caseta), str(i), "0"])
-            for e in ["E1", "E2"]:
-                filas.append([f"{caseta}-{e}", str(caseta), e, "0"])
-        ws.append_rows(filas, value_input_option="USER_ENTERED")
+    # IDs esperados: X-1 a X-18 para X en {1,2,3,4} = 72 filas
+    ids_esperados = set()
+    for caseta in range(1, 5):
+        for i in range(1, 19):
+            ids_esperados.add(f"{caseta}-{i}")
+
+    # IDs existentes (columna A, sin encabezado)
+    ids_existentes = set()
+    for fila in valores[1:]:
+        if fila and fila[0]:
+            ids_existentes.add(fila[0])
+
+    # Crear las filas faltantes
+    faltantes = []
+    for uid in sorted(ids_esperados - ids_existentes):
+        caseta, corral = uid.split("-")
+        faltantes.append([uid, caseta, corral, "0"])
+
+    if faltantes:
+        ws.append_rows(faltantes, value_input_option="USER_ENTERED")
 
 def get_estado():
     """Lee la pestaña 'estado' y devuelve {id: poblacion}."""
@@ -178,9 +189,18 @@ def render_unidad(uid, poblacion, compacto=False):
 def render_caseta(caseta):
     st.subheader(f"🏠 Caseta {caseta}")
 
-    filas = [("E1", "E2")]
-    for fila in range(8):
-        filas.append((str(1 + fila * 2), str(2 + fila * 2)))
+    # Orden visual: 9 filas, cada una (izquierda, derecha)
+    filas = [
+        ("10", "9"),
+        ("11", "8"),
+        ("12", "7"),
+        ("13", "6"),
+        ("14", "5"),
+        ("15", "4"),
+        ("16", "3"),
+        ("17", "2"),
+        ("18", "1"),
+    ]
 
     html = '<div style="display:flex; justify-content:center; padding:10px; background:#eaf4fb; border-radius:12px; border:1px solid #b0c4de;"><table style="border-collapse:separate; border-spacing:0 6px;">'
 
@@ -190,8 +210,9 @@ def render_caseta(caseta):
         pob_izq = estado.get(uid_izq, 0)
         pob_der = estado.get(uid_der, 0)
 
-        es_enfermeria = izq_id.startswith("E")
-        ancho = "70px" if es_enfermeria else "130px"
+        # Corrales 10 y 9 (enfermerías) son visualmente más chicos
+        es_enfermeria = izq_id in ("10", "9")
+        ancho = "80px" if es_enfermeria else "130px"
         alto = "50px" if es_enfermeria else "auto"
 
         html += (
@@ -211,8 +232,11 @@ def render_caseta(caseta):
 
     with st.expander(f"✏️ Editar corrales de Caseta {caseta}"):
         cols = st.columns(6)
-        todos_ids = [f"{caseta}-E1", f"{caseta}-E2"] + \
-                    [f"{caseta}-{i}" for i in range(1, 17)]
+        # Orden lógico: 10, 9, 11, 8, 12, 7, ... (visual arriba-abajo)
+        todos_ids = []
+        for izq, der in filas:
+            todos_ids.append(f"{caseta}-{izq}")
+            todos_ids.append(f"{caseta}-{der}")
 
         for idx, uid in enumerate(todos_ids):
             with cols[idx % 6]:
