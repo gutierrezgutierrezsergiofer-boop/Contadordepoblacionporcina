@@ -23,7 +23,7 @@ try:
 
     # 2. Leer credenciales desde los secrets
     # st.secrets["connections"]["gsheets"] devuelve un dict-like con todas las claves
-    creds_dict = dict(st.secrets["connections"]["gsheets"])
+    creds_dict = dict(st.secrets["gcp_service_account"])
     
     # 3. Crear credenciales y autorizar
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
