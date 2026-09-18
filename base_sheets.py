@@ -8,29 +8,67 @@ Original file is located at
 """
 
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 import pandas as pd
 
-st.title(" Test de conexión con Google Sheets")
+st.title(" Test de conexión con Google Sheets (gspread)")
 
 try:
-    # Crear la conexión (lee los secrets automáticamente)
-    conn = st.connection("gsheets", type=GSheetsConnection)
+    # 1. Definir los scopes necesarios
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    # 2. Leer credenciales desde los secrets
+    # st.secrets["connections"]["gsheets"] devuelve un dict-like con todas las claves
+    creds_dict = dict(st.secrets["connections"]["gsheets"])
+    
+    # 3. Crear credenciales y autorizar
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
     st.success("✅ Conexión con Google Sheets establecida")
 
-    # Leer la pestaña 'estado'
-    df = conn.read(worksheet="estado", ttl=0)
-    st.write("📄 Contenido de la pestaña 'estado':")
-    st.dataframe(df)
+    # 4. Abrir la hoja por ID
+    sheet_id = "10aCfWrVTpIbXGMrM-TbQ4R_xFT7xP9ShtCgQN8go0LI"
+    spreadsheet = client.open_by_key(sheet_id)
 
-    # Mostrar info de las otras pestañas
+    # 5. Leer la pestaña 'estado'
+    worksheet = spreadsheet.worksheet("estado")
+    datos = worksheet.get_all_values()  # Lista de listas
+    st.write("📄 Contenido de la pestaña 'estado':")
+    
+    if len(datos) > 1:
+        df = pd.DataFrame(datos[1:], columns=datos[0])
+        st.dataframe(df)
+    else:
+        st.info("La pestaña está vacía o solo tiene encabezados")
+
+    # 6. Probar lectura de las otras pestañas
     with st.expander("📄 Pestaña 'movimientos'"):
-        df2 = conn.read(worksheet="movimientos", ttl=0)
-        st.dataframe(df2)
+        try:
+            ws_mov = spreadsheet.worksheet("movimientos")
+            datos_mov = ws_mov.get_all_values()
+            if len(datos_mov) > 1:
+                df_mov = pd.DataFrame(datos_mov[1:], columns=datos_mov[0])
+                st.dataframe(df_mov)
+            else:
+                st.info("Sin datos")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
     with st.expander("📄 Pestaña 'snapshots'"):
-        df3 = conn.read(worksheet="snapshots", ttl=0)
-        st.dataframe(df3)
+        try:
+            ws_snap = spreadsheet.worksheet("snapshots")
+            datos_snap = ws_snap.get_all_values()
+            if len(datos_snap) > 1:
+                df_snap = pd.DataFrame(datos_snap[1:], columns=datos_snap[0])
+                st.dataframe(df_snap)
+            else:
+                st.info("Sin datos")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 except Exception as e:
     st.error(f"❌ Error: {e}")
