@@ -701,4 +701,71 @@ def pagina_estadisticas():
     # Solo muertos por ahora
     st.subheader("⚫ Muertes")
 
-    with
+    with st.spinner("Cargando datos..."):
+        df_bajas = leer_bajas()
+
+    if len(df_bajas) == 0:
+        st.info("Aún no hay datos de bajas registrados. Registra muertes desde la página de Control.")
+        return
+
+    dias_num = None if dias == "Todo" else int(dias)
+    df_muertes = preparar_datos_muertes(df_bajas, dias_num)
+
+    if len(df_muertes) == 0:
+        st.info("No hay muertes registradas en el rango seleccionado.")
+        return
+
+    # Métricas rápidas
+    total_rango = df_muertes["cantidad"].sum()
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Muertes en el rango", total_rango)
+    col2.metric("Días con datos", df_muertes["fecha"].nunique())
+    col3.metric("Promedio diario", round(total_rango / max(df_muertes["fecha"].nunique(), 1), 2))
+
+    st.markdown("---")
+
+    # 4 gráficas individuales (2x2)
+    st.subheader("Por caseta")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.plotly_chart(grafica_caseta(df_muertes, "1", modo),
+                        use_container_width=True)
+        st.plotly_chart(grafica_caseta(df_muertes, "3", modo),
+                        use_container_width=True)
+    with col_b:
+        st.plotly_chart(grafica_caseta(df_muertes, "2", modo),
+                        use_container_width=True)
+        st.plotly_chart(grafica_caseta(df_muertes, "4", modo),
+                        use_container_width=True)
+
+    st.markdown("---")
+
+    # Gráfica total stacked
+    st.subheader("Total granja")
+    fig_total = grafica_total_stacked(df_muertes, modo)
+    if fig_total:
+        st.plotly_chart(fig_total, use_container_width=True)
+
+# ==================== NAVEGACIÓN ====================
+st.set_page_config(page_title="Granja de cerdos", layout="wide")
+
+# Inicialización (solo una vez)
+if "init_done" not in st.session_state:
+    init_hojas()
+    iniciar_scheduler()
+    st.session_state["init_done"] = True
+
+# Sidebar
+with st.sidebar:
+    st.title("🐖 Granja")
+    st.markdown("---")
+    pagina = st.radio("Navegación:", ["🏠 Control", "📊 Estadísticas"],
+                      key="nav_principal")
+    st.markdown("---")
+    st.caption("Sistema de control de población porcina")
+
+# Render de la página seleccionada
+if pagina == "🏠 Control":
+    pagina_control()
+else:
+    pagina_estadisticas()
