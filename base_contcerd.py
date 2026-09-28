@@ -1,9 +1,10 @@
-
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
-from datetime import datetime, date
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, date, timedelta
 import threading
 import time
 
@@ -26,15 +27,12 @@ def get_spreadsheet():
 
 # ==================== HELPERS ====================
 def es_enfermeria(corral):
-    """Devuelve True si el corral es 9 o 10 (enfermería)."""
     return str(corral) in ("9", "10")
 
 def timestamp_ahora():
-    """Timestamp ISO para guardar."""
     return datetime.now().isoformat()
 
 def formatear_timestamp(ts):
-    """Convierte ISO a formato bonito para mostrar."""
     try:
         return pd.to_datetime(ts).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
@@ -42,7 +40,6 @@ def formatear_timestamp(ts):
 
 # ==================== FUNCIONES DE BASE DE DATOS ====================
 def init_hojas():
-    """Crea las 72 filas iniciales en la pestaña 'estado' si no existen."""
     sh = get_spreadsheet()
     ws = sh.worksheet("estado")
     valores = ws.get_all_values()
@@ -66,7 +63,6 @@ def init_hojas():
         ws.append_rows(faltantes, value_input_option="USER_ENTERED")
 
 def get_estado():
-    """Lee la pestaña 'estado' y devuelve {id: poblacion}."""
     sh = get_spreadsheet()
     ws = sh.worksheet("estado")
     valores = ws.get_all_values()
@@ -80,7 +76,6 @@ def get_estado():
     return estado
 
 def _buscar_fila_estado(ws_estado, unidad_id, valores=None):
-    """Devuelve (fila_idx, valor_actual) para una unidad. fila_idx es 1-based (para update_cell)."""
     if valores is None:
         valores = ws_estado.get_all_values()
     for i, fila in enumerate(valores[1:], start=2):
@@ -93,37 +88,24 @@ def _buscar_fila_estado(ws_estado, unidad_id, valores=None):
     return None, None
 
 def _registrar_movimiento(sh, unidad_id, categoria, anterior, nuevo, motivo=""):
-    """Agrega una fila a la pestaña 'movimientos'."""
     ws_mov = sh.worksheet("movimientos")
     ws_mov.append_row([
-        timestamp_ahora(),
-        unidad_id,
-        categoria,
-        str(anterior),
-        str(nuevo),
-        motivo or ""
+        timestamp_ahora(), unidad_id, categoria,
+        str(anterior), str(nuevo), motivo or ""
     ], value_input_option="USER_ENTERED")
 
 def _registrar_baja(sh, caseta, corral_origen, tipo, cantidad, motivo=""):
-    """Agrega una fila a la pestaña 'bajas'."""
     ws_bajas = sh.worksheet("bajas")
     ws_bajas.append_row([
-        timestamp_ahora(),
-        str(caseta),
-        str(corral_origen),
-        tipo,
-        str(cantidad),
-        motivo or ""
+        timestamp_ahora(), str(caseta), str(corral_origen),
+        tipo, str(cantidad), motivo or ""
     ], value_input_option="USER_ENTERED")
 
 def _actualizar_poblacion(sh, ws_estado, fila_idx, nuevo_valor):
-    """Actualiza la celda de población (columna D)."""
     ws_estado.update_cell(fila_idx, 4, int(nuevo_valor))
 
 # ==================== ACCIONES ====================
-
 def ajustar_calculo(unidad_id, nuevo_valor, motivo=""):
-    """Corrige el total por error de conteo."""
     sh = get_spreadsheet()
     ws_estado = sh.worksheet("estado")
     fila_idx, anterior = _buscar_fila_estado(ws_estado, unidad_id)
@@ -139,7 +121,6 @@ def ajustar_calculo(unidad_id, nuevo_valor, motivo=""):
     return True
 
 def añadir_cerdos(unidad_id, cantidad, motivo=""):
-    """Añade cerdos (recepción, nacimiento, ingreso)."""
     sh = get_spreadsheet()
     ws_estado = sh.worksheet("estado")
     fila_idx, anterior = _buscar_fila_estado(ws_estado, unidad_id)
@@ -156,7 +137,6 @@ def añadir_cerdos(unidad_id, cantidad, motivo=""):
     return True
 
 def mover_entre_corrales(uid_origen, uid_destino, cantidad, motivo=""):
-    """Mueve cerdos entre corrales del mismo tipo (normal↔normal o enfermería↔enfermería)."""
     if cantidad <= 0:
         st.error("La cantidad debe ser mayor a 0")
         return False
@@ -186,14 +166,11 @@ def mover_entre_corrales(uid_origen, uid_destino, cantidad, motivo=""):
     elif not es_enfermeria(corral_o) and not es_enfermeria(corral_d):
         categoria = "mover_normal"
     else:
-        st.error("Origen y destino deben ser del mismo tipo (ambos enfermería o ambos normales)")
+        st.error("Origen y destino deben ser del mismo tipo")
         return False
 
-    # Actualizar origen y destino
     _actualizar_poblacion(sh, ws_estado, fila_o, ant_o - cantidad)
     _actualizar_poblacion(sh, ws_estado, fila_d, ant_d + cantidad)
-
-    # Registrar 2 movimientos
     _registrar_movimiento(sh, uid_origen, categoria, ant_o, ant_o - cantidad, motivo)
     _registrar_movimiento(sh, uid_destino, categoria, ant_d, ant_d + cantidad, motivo)
 
@@ -201,7 +178,6 @@ def mover_entre_corrales(uid_origen, uid_destino, cantidad, motivo=""):
     return True
 
 def mover_a_enfermeria(uid_origen, uid_destino, cantidad, motivo=""):
-    """Mueve cerdos de un corral normal a enfermería (9 o 10)."""
     if cantidad <= 0:
         st.error("La cantidad debe ser mayor a 0")
         return False
@@ -238,7 +214,6 @@ def mover_a_enfermeria(uid_origen, uid_destino, cantidad, motivo=""):
     return True
 
 def recuperar_de_enfermeria(uid_origen, uid_destino, cantidad, motivo=""):
-    """Mueve cerdos de enfermería a un corral normal."""
     if cantidad <= 0:
         st.error("La cantidad debe ser mayor a 0")
         return False
@@ -275,7 +250,6 @@ def recuperar_de_enfermeria(uid_origen, uid_destino, cantidad, motivo=""):
     return True
 
 def registrar_baja(unidad_id, tipo, cantidad, motivo=""):
-    """Registra muerte o sacrificio. Resta del corral y suma a 'bajas'."""
     if tipo not in ("muerto", "sacrificado"):
         st.error("Tipo debe ser 'muerto' o 'sacrificado'")
         return False
@@ -304,9 +278,8 @@ def registrar_baja(unidad_id, tipo, cantidad, motivo=""):
     st.cache_data.clear()
     return True
 
-# ==================== GUARDADO AUTOMÁTICO A MEDIANOCHE ====================
+# ==================== SNAPSHOTS ====================
 def guardar_snapshot(motivo="manual"):
-    """Guarda un snapshot de todas las poblaciones."""
     sh = get_spreadsheet()
     ws_estado = sh.worksheet("estado")
     valores = ws_estado.get_all_values()
@@ -340,14 +313,29 @@ def iniciar_scheduler():
     t.start()
     return True
 
-# ==================== CONFIGURACIÓN INICIAL ====================
-st.set_page_config(page_title="Granja de cerdos", layout="wide")
-init_hojas()
-iniciar_scheduler()
+# ==================== LECTURA DE BAJAS ====================
+@st.cache_data(ttl=60)
+def leer_bajas():
+    """Lee la pestaña 'bajas' y devuelve un DataFrame."""
+    sh = get_spreadsheet()
+    ws = sh.worksheet("bajas")
+    valores = ws.get_all_values()
+    if len(valores) <= 1:
+        return pd.DataFrame(columns=["timestamp", "caseta", "corral_origen",
+                                     "tipo", "cantidad", "motivo"])
+    df = pd.DataFrame(valores[1:],
+                      columns=["timestamp", "caseta", "corral_origen",
+                               "tipo", "cantidad", "motivo"])
+    # Parsear
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["caseta"] = df["caseta"].astype(str)
+    df["corral_origen"] = df["corral_origen"].astype(str)
+    df["cantidad"] = pd.to_numeric(df["cantidad"], errors="coerce").fillna(0).astype(int)
+    df["fecha"] = df["timestamp"].dt.date
+    return df
 
 # ==================== EDITOR DE CADA CORRAL ====================
 def editor_corral(uid, poblacion):
-    """Muestra el editor de acciones para un corral."""
     corral = uid.split("-")[1]
     caseta = uid.split("-")[0]
     en_enf = es_enfermeria(corral)
@@ -355,7 +343,6 @@ def editor_corral(uid, poblacion):
     st.markdown(f"#### Editando **{uid}** (actual: {poblacion})")
     st.caption(f"Tipo: {'🏥 Enfermería' if en_enf else '🟢 Corral normal'}")
 
-    # Opciones según tipo
     if en_enf:
         opciones = [
             "🔢 Ajuste de cálculo",
@@ -376,7 +363,6 @@ def editor_corral(uid, poblacion):
         ]
 
     accion = st.radio("Acción:", opciones, key=f"accion_{uid}")
-
     motivo = st.text_input("Motivo (opcional)", key=f"motivo_{uid}",
                            placeholder="ej: enfermedad, orden sanitaria...")
 
@@ -398,13 +384,11 @@ def editor_corral(uid, poblacion):
 
     elif accion == "🔄 Mover a otro corral" or accion == "🔄 Mover a otra enfermería":
         if en_enf:
-            # Mover entre 9 y 10 de la misma caseta
             otro = "10" if corral == "9" else "9"
             uid_destino = f"{caseta}-{otro}"
             st.info(f"Destino: **{uid_destino}**")
             destinos = [uid_destino]
         else:
-            # Mover a otro corral normal de la misma caseta
             destinos_posibles = [f"{caseta}-{i}" for i in range(1, 19)
                                  if not es_enfermeria(i) and f"{caseta}-{i}" != uid]
             uid_destino = st.selectbox("Corral destino", destinos_posibles,
@@ -462,7 +446,6 @@ def editor_corral(uid, poblacion):
                 st.session_state[f"editar_{uid}"] = False
                 st.rerun()
 
-    # Botón cancelar
     if st.button("❌ Cerrar editor", key=f"cancel_{uid}", width="stretch"):
         st.session_state[f"editar_{uid}"] = False
         st.rerun()
@@ -472,15 +455,8 @@ def render_caseta(caseta):
     st.subheader(f"🏠 Caseta {caseta}")
 
     filas = [
-        ("10", "9"),
-        ("11", "8"),
-        ("12", "7"),
-        ("13", "6"),
-        ("14", "5"),
-        ("15", "4"),
-        ("16", "3"),
-        ("17", "2"),
-        ("18", "1"),
+        ("10", "9"), ("11", "8"), ("12", "7"), ("13", "6"), ("14", "5"),
+        ("15", "4"), ("16", "3"), ("17", "2"), ("18", "1"),
     ]
 
     html = '<div style="display:flex; justify-content:center; padding:10px; background:#eaf4fb; border-radius:12px; border:1px solid #b0c4de;"><table style="border-collapse:separate; border-spacing:0 6px;">'
@@ -494,7 +470,7 @@ def render_caseta(caseta):
         es_enf = izq_id in ("10", "9")
         ancho = "80px" if es_enf else "130px"
         alto = "50px" if es_enf else "auto"
-        bg = "#f5e6c8" if es_enf else "#c9dff0"  # color distinto para enfermería
+        bg = "#f5e6c8" if es_enf else "#c9dff0"
 
         html += (
             f'<tr>'
@@ -525,81 +501,204 @@ def render_caseta(caseta):
                              width="stretch"):
                     st.session_state[f"editar_{uid}"] = True
 
-        # Mostrar editor del corral seleccionado
         for uid in todos_ids:
             if st.session_state.get(f"editar_{uid}", False):
                 pob = estado.get(uid, 0)
                 editor_corral(uid, pob)
 
-# ==================== RENDER PRINCIPAL ====================
-st.title("🐖 Control de población - Granja")
+# ==================== PÁGINA: CONTROL ====================
+def pagina_control():
+    st.title("🐖 Control de población - Granja")
 
-with st.spinner("Cargando datos desde Google Sheets..."):
-    estado = get_estado()
+    with st.spinner("Cargando datos desde Google Sheets..."):
+        estado = get_estado()
 
-total = sum(estado.values())
-col1, col2, col3 = st.columns([2, 1, 1])
-col1.metric("Población total", total)
-if col2.button("💾 Guardar snapshot manual", width="stretch"):
-    with st.spinner("Guardando snapshot..."):
-        n = guardar_snapshot("manual")
-    st.success(f"Snapshot guardado ({n} unidades)")
-if col3.button("🔄 Refrescar", width="stretch"):
-    st.cache_data.clear()
-    st.rerun()
+    total = sum(estado.values())
+    col1, col2, col3 = st.columns([2, 1, 1])
+    col1.metric("Población total", total)
+    if col2.button("💾 Guardar snapshot manual", width="stretch"):
+        with st.spinner("Guardando snapshot..."):
+            n = guardar_snapshot("manual")
+        st.success(f"Snapshot guardado ({n} unidades)")
+    if col3.button("🔄 Refrescar", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
 
-for c in range(1, 5):
-    render_caseta(c)
+    for c in range(1, 5):
+        render_caseta(c)
+        st.markdown("---")
+
+    with st.expander("📜 Historial de movimientos"):
+        try:
+            sh = get_spreadsheet()
+            ws = sh.worksheet("movimientos")
+            valores = ws.get_all_values()
+            if len(valores) > 1:
+                df = pd.DataFrame(valores[1:],
+                                  columns=["Fecha", "Unidad", "Categoría",
+                                           "Antes", "Después", "Motivo"])
+                df["Fecha"] = df["Fecha"].apply(formatear_timestamp)
+                df = df.iloc[::-1].head(200)
+                st.dataframe(df, width="stretch")
+            else:
+                st.info("Sin movimientos registrados aún.")
+        except Exception as e:
+            st.error(f"Error leyendo movimientos: {e}")
+
+    with st.expander("⚫🔴 Historial de bajas"):
+        try:
+            df = leer_bajas()
+            if len(df) > 0:
+                df_mostrar = df.copy()
+                df_mostrar["timestamp"] = df_mostrar["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                df_mostrar = df_mostrar.rename(columns={
+                    "timestamp": "Fecha", "caseta": "Caseta",
+                    "corral_origen": "Corral", "tipo": "Tipo",
+                    "cantidad": "Cantidad", "motivo": "Motivo"
+                })
+                df_mostrar = df_mostrar.iloc[::-1].head(200)
+                st.dataframe(df_mostrar[["Fecha", "Caseta", "Corral",
+                                         "Tipo", "Cantidad", "Motivo"]],
+                             width="stretch")
+            else:
+                st.info("Sin bajas registradas aún.")
+        except Exception as e:
+            st.error(f"Error leyendo bajas: {e}")
+
+    with st.expander("📸 Snapshots guardados"):
+        try:
+            sh = get_spreadsheet()
+            ws = sh.worksheet("snapshots")
+            valores = ws.get_all_values()
+            if len(valores) > 1:
+                df = pd.DataFrame(valores[1:],
+                                  columns=["Fecha", "Unidad", "Población"])
+                resumen = df.groupby("Fecha").agg(
+                    Unidades=("Unidad", "count"),
+                    Total=("Población",
+                           lambda x: pd.to_numeric(x, errors="coerce").sum())
+                ).reset_index().sort_values("Fecha", ascending=False)
+                st.dataframe(resumen, width="stretch")
+            else:
+                st.info("Sin snapshots guardados aún.")
+        except Exception as e:
+            st.error(f"Error leyendo snapshots: {e}")
+
+# ==================== PÁGINA: ESTADÍSTICAS ====================
+def preparar_datos_muertes(df_bajas, dias=None):
+    """
+    Prepara datos de muertes agrupados por día y caseta.
+    Devuelve un DataFrame con columnas: fecha, caseta, cantidad.
+    """
+    df = df_bajas[df_bajas["tipo"] == "muerto"].copy()
+    if len(df) == 0:
+        return pd.DataFrame(columns=["fecha", "caseta", "cantidad"])
+
+    if dias is not None:
+        corte = pd.Timestamp(date.today() - timedelta(days=dias-1))
+        df = df[df["timestamp"] >= corte]
+
+    # Agrupar por fecha + caseta
+    agrupado = df.groupby(["fecha", "caseta"])["cantidad"].sum().reset_index()
+
+    # Rellenar días faltantes con 0
+    if len(agrupado) > 0:
+        min_fecha = agrupado["fecha"].min()
+        max_fecha = agrupado["fecha"].max()
+        rango_fechas = pd.date_range(min_fecha, max_fecha, freq="D").date
+        casetas = ["1", "2", "3", "4"]
+
+        completo = []
+        for f in rango_fechas:
+            for c in casetas:
+                completo.append({"fecha": f, "caseta": c, "cantidad": 0})
+        completo = pd.DataFrame(completo)
+
+        agrupado = completo.merge(agrupado, on=["fecha", "caseta"],
+                                  how="left", suffixes=("", "_y"))
+        agrupado["cantidad"] = agrupado["cantidad_y"].fillna(agrupado["cantidad"]).fillna(0).astype(int)
+        agrupado = agrupado[["fecha", "caseta", "cantidad"]]
+
+    return agrupado
+
+def grafica_caseta(df, caseta, modo):
+    """Gráfica de línea para una caseta individual."""
+    df_c = df[df["caseta"] == caseta].sort_values("fecha").copy()
+    if modo == "Acumulado":
+        df_c["valor"] = df_c["cantidad"].cumsum()
+    else:
+        df_c["valor"] = df_c["cantidad"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_c["fecha"], y=df_c["valor"],
+        mode="lines+markers",
+        line=dict(color="#c0392b", width=2),
+        marker=dict(size=6),
+        fill="tozeroy",
+        fillcolor="rgba(192, 57, 43, 0.15)",
+        name=f"Caseta {caseta}"
+    ))
+    fig.update_layout(
+        title=f"Caseta {caseta}",
+        xaxis_title="Día",
+        yaxis_title="Muertos" + (" acumulados" if modo == "Acumulado" else " por día"),
+        height=300,
+        margin=dict(l=20, r=20, t=40, b=20),
+        showlegend=False
+    )
+    return fig
+
+def grafica_total_stacked(df, modo):
+    """Gráfica de área apilada con las 4 casetas."""
+    if len(df) == 0:
+        return None
+
+    pivote = df.pivot_table(index="fecha", columns="caseta",
+                            values="cantidad", aggfunc="sum").fillna(0)
+    pivote = pivote.sort_index()
+
+    if modo == "Acumulado":
+        pivote = pivote.cumsum()
+
+    colores = {"1": "#3498db", "2": "#2ecc71", "3": "#f39c12", "4": "#9b59b6"}
+
+    fig = go.Figure()
+    for caseta in ["1", "2", "3", "4"]:
+        if caseta in pivote.columns:
+            fig.add_trace(go.Scatter(
+                x=pivote.index, y=pivote[caseta],
+                mode="lines",
+                stackgroup="one",
+                name=f"Caseta {caseta}",
+                line=dict(width=0.5, color=colores[caseta]),
+                fillcolor=colores[caseta]
+            ))
+    fig.update_layout(
+        title="🏠 Total granja (aportación por caseta)",
+        xaxis_title="Día",
+        yaxis_title="Muertos" + (" acumulados" if modo == "Acumulado" else " por día"),
+        height=400,
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    return fig
+
+def pagina_estadisticas():
+    st.title("📊 Estadísticas")
+
+    # Filtros
+    col_f1, col_f2 = st.columns([1, 1])
+    with col_f1:
+        dias = st.selectbox("Rango:", [7, 14, 30, 90, "Todo"],
+                            index=2, key="filtro_dias")
+    with col_f2:
+        modo = st.radio("Modo:", ["Diarios", "Acumulado"],
+                        horizontal=True, key="filtro_modo")
+
     st.markdown("---")
 
-# ==================== AUDITORÍA ====================
-with st.expander("📜 Historial de movimientos"):
-    try:
-        sh = get_spreadsheet()
-        ws = sh.worksheet("movimientos")
-        valores = ws.get_all_values()
-        if len(valores) > 1:
-            df = pd.DataFrame(valores[1:],
-                              columns=["Fecha", "Unidad", "Categoría",
-                                       "Antes", "Después", "Motivo"])
-            df["Fecha"] = df["Fecha"].apply(formatear_timestamp)
-            df = df.iloc[::-1].head(200)
-            st.dataframe(df, width="stretch")
-        else:
-            st.info("Sin movimientos registrados aún.")
-    except Exception as e:
-        st.error(f"Error leyendo movimientos: {e}")
+    # Solo muertos por ahora
+    st.subheader("⚫ Muertes")
 
-with st.expander("⚫🔴 Historial de bajas (muertos y sacrificados)"):
-    try:
-        sh = get_spreadsheet()
-        ws = sh.worksheet("bajas")
-        valores = ws.get_all_values()
-        if len(valores) > 1:
-            df = pd.DataFrame(valores[1:],
-                              columns=["Fecha", "Caseta", "Corral",
-                                       "Tipo", "Cantidad", "Motivo"])
-            df["Fecha"] = df["Fecha"].apply(formatear_timestamp)
-            df = df.iloc[::-1].head(200)
-            st.dataframe(df, width="stretch")
-        else:
-            st.info("Sin bajas registradas aún.")
-    except Exception as e:
-        st.error(f"Error leyendo bajas: {e}")
-
-with st.expander("📸 Snapshots guardados"):
-    try:
-        sh = get_spreadsheet()
-        ws = sh.worksheet("snapshots")
-        valores = ws.get_all_values()
-        if len(valores) > 1:
-            df = pd.DataFrame(valores[1:], columns=["Fecha", "Unidad", "Población"])
-            resumen = df.groupby("Fecha").agg(
-                Unidades=("Unidad", "count"),
-                Total=("Población", lambda x: pd.to_numeric(x, errors="coerce").sum())
-            ).reset_index().sort_values("Fecha", ascending=False)
-            st.dataframe(resumen, width="stretch")
-        else:
-            st.info("Sin snapshots guardados aún.")
-    except Exception as e:
-        st.error(f"Error leyendo snapshots: {e}")
+    with
