@@ -316,22 +316,37 @@ def iniciar_scheduler():
 # ==================== LECTURA DE BAJAS ====================
 @st.cache_data(ttl=60)
 def leer_bajas():
-    """Lee la pestaña 'bajas' y devuelve un DataFrame."""
+    """Lee la pestaña 'bajas' y devuelve un DataFrame robusto."""
     sh = get_spreadsheet()
     ws = sh.worksheet("bajas")
     valores = ws.get_all_values()
     if len(valores) <= 1:
         return pd.DataFrame(columns=["timestamp", "caseta", "corral_origen",
                                      "tipo", "cantidad", "motivo"])
-    df = pd.DataFrame(valores[1:],
-                      columns=["timestamp", "caseta", "corral_origen",
-                               "tipo", "cantidad", "motivo"])
+
+    columnas = ["timestamp", "caseta", "corral_origen",
+                "tipo", "cantidad", "motivo"]
+
+    # Normalizar filas: rellenar con "" hasta tener 6 columnas
+    filas = []
+    for fila in valores[1:]:
+        if not fila or all(c == "" for c in fila):
+            continue  # saltar filas vacías
+        fila_normalizada = list(fila) + [""] * (6 - len(fila))
+        filas.append(fila_normalizada[:6])  # recortar si tiene más de 6
+
+    df = pd.DataFrame(filas, columns=columnas)
+
     # Parsear
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df["caseta"] = df["caseta"].astype(str)
     df["corral_origen"] = df["corral_origen"].astype(str)
     df["cantidad"] = pd.to_numeric(df["cantidad"], errors="coerce").fillna(0).astype(int)
     df["fecha"] = df["timestamp"].dt.date
+
+    # Descartar filas sin timestamp válido
+    df = df[df["timestamp"].notna()].reset_index(drop=True)
+
     return df
 
 # ==================== EDITOR DE CADA CORRAL ====================
