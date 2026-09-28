@@ -451,7 +451,7 @@ def editor_corral(uid, poblacion):
         st.rerun()
 
 # ==================== RENDER DE CADA CASETA ====================
-def render_caseta(caseta):
+def render_caseta(caseta, estado):
     st.subheader(f"🏠 Caseta {caseta}")
 
     filas = [
@@ -525,7 +525,7 @@ def pagina_control():
         st.rerun()
 
     for c in range(1, 5):
-        render_caseta(c)
+        render_caseta(c, estado)
         st.markdown("---")
 
     with st.expander("📜 Historial de movimientos"):
